@@ -1,0 +1,205 @@
+#!/usr/bin/php
+<?php
+
+function fail(string $message = 'Error occured') {
+  exit("❌ ${message}\n");
+}
+
+function info(string $message) {
+  print("👉 ${message}\n");
+}
+
+function success(string $message) {
+  print("✅ ${message}\n");
+}
+
+define('CWD', getcwd());
+
+$arguments = array_slice($argv, 1);
+
+$source = array_shift($arguments);
+$target = array_shift($arguments);
+$targetExtension = pathinfo($target ?? '', PATHINFO_EXTENSION);
+
+define('IS_LESS', strtolower($targetExtension) === 'less');
+
+$aliases = [
+  '-b' => 'backup',
+  '--backup' => 'backup',
+  '-t' => 'template',
+  '--template' => 'template',
+  '-r' => 'replace-colours',
+  '--replace-colours' => 'replace-colours',
+  '-c' => 'comment',
+  '--comment' => 'comment',
+  '-n' => "new-line",
+  '--new-line' => "new-line",
+];
+
+$defaults = [
+  'backup' => true,
+  'replace-colours' => IS_LESS ? true : false,
+  'template' => null,
+  'comment' => '',
+  'new-line' => true,
+];
+
+$arguments = array_reduce($arguments, function(array $arguments, string $argument) use ($aliases) {
+  $argument = explode('=', strtr($argument, $aliases), 2);
+  $key = array_shift($argument);
+  $value = array_shift($argument) ?? true;
+
+  $value = $value === 'false' ? false : $value;
+  $value = $value === 'true' ? true : $value;
+
+  $arguments[$key] = $value;
+
+  return $arguments;
+}, []);
+
+$arguments = array_merge($defaults, $arguments);
+
+if (!$arguments['template']) {
+  $arguments['template'] = IS_LESS
+    ? ($arguments['replace-colours']
+      ? ".icon-%s-mixin(@fill, @stroke: transparent) { @fill-color: replace(@fill, '#', '%%23'); @stroke-color: replace(@stroke, '#', '%%23');  background-image: url(\"data:image/svg+xml,%s\") }"
+      : ".icon-%s() { background-image: url(\"data:image/svg+xml,%s\") }"
+    )
+    : ".icon-%s { background-image: url(\"data:image/svg+xml,%s\") }";
+}
+
+define('BACKUP', $arguments['backup']);
+define('TEMPLATE', $arguments['template']);
+define('REPLACE_COLOURS', IS_LESS && $arguments['replace-colours']);
+define('COMMENT', $arguments['comment']);
+define('NEW_LINE', $arguments['new-line'] ? "\n" : '');
+
+if (!isset($source)) {
+  fail("Source directory not specified");
+}
+
+if (!isset($target)) {
+  fail("Target file is not specified");
+}
+
+define('ABSOLUTE', $source[0] === '/');
+define('RELATIVE', !ABSOLUTE);
+
+if (RELATIVE) {
+  $source = CWD.'/'.ltrim($source);
+
+  info("Switching to relative path mode");
+
+  if (!realpath($source)) {
+    fail("Source directory path does not exist");
+  }
+
+  success("Relative path directory exists");
+} else {
+  info("Switching to absolute path mode");
+
+  if (!realpath($source)) {
+    fail("Source directory path does not exist");
+  }
+
+  success("Absolute path directory exists");
+}
+
+$target = ABSOLUTE ? $target : CWD.'/'.$target;
+$targetParent = dirname($target);
+
+if (!file_exists($targetParent)) {
+  fail("Target file parent directory does not exist");
+}
+
+success("Target parent directory exists");
+
+if (file_exists($target)) {
+  if (is_dir($target)) {
+    fail("Target file cannot be a directory");
+  }
+
+  if (BACKUP) {
+    copy($target, sprintf('%s.%s.bkp', $target, time()));
+    info("Made a backup of the target file");
+  }
+}
+
+success("Target file set");
+
+$files = glob("${source}/*.svg");
+
+if (empty($files)) {
+  fail("No files to process");
+}
+
+// https://stackoverflow.com/questions/10290849/how-to-remove-multiple-utf-8-bom-sequences
+function remove_utf8_bom($text) {
+  $bom = pack('H*','EFBBBF');
+  $text = preg_replace("/^$bom/", '', $text);
+  return $text;
+}
+
+function encode(string $svg) {
+  $position = strpos($svg, '\'');
+
+  if ($position !== false) {
+    throw new \Exception("Eunexpected single quotes in SVG at ${position} offset");
+  }
+
+  if (REPLACE_COLOURS) {
+    $svg = preg_replace('/(fill|stroke)="[^"]+"/', '$1="@{$1-color}"', $svg);
+
+    if (strpos($svg, '@{fill-color}') === false) {
+      info("Missing fill atribute");
+
+      $svg = preg_replace('/^<svg/', '<svg fill="@{fill-color}"', $svg);
+    }
+
+    if (strpos($svg, '@{stroke-color}') === false) {
+      info("Missing stroke atribute");
+
+      $svg = preg_replace('/^<svg/', '<svg stroke="@{stroke-color}"', $svg);
+    }
+  }
+
+  // No multi-space
+  $svg = preg_replace('/\s+/', ' ', $svg);
+  $svg = str_replace('"', '\'', $svg);
+
+  // Encode and bring back what doesn't need to be encoded
+  $svg = rawurlencode($svg);
+  $svg = strtr($svg, [
+    '%20' => ' ',
+    '%27' => '\'',
+    '%3D' => '=',
+    '%3A' => ':',
+    '%2F' => '/',
+    '%40%7Bfill-color%7D' => '@{fill-color}',
+    '%40%7Bstroke-color%7D' => '@{stroke-color}',
+  ]);
+
+  return $svg;
+}
+
+$lessCSS = COMMENT ? [ COMMENT ] : [];
+
+foreach ($files as $file) {
+  info(sprintf("Processing file `%s`", basename($file)));
+
+  $svg = file_get_contents($file);
+  $id = preg_replace('/\s+/', '-', substr(strtolower(basename($file)), 0, -4));
+
+  try {
+    $lessCSS[] = sprintf(TEMPLATE, $id, encode($svg));
+  } catch (\Throwable $th) {
+    fail(sprintf('Unable to process file `%s`', basename($file)).': '.$th->getMessage());
+  }
+}
+
+
+if (!file_put_contents($target, implode("\n", $lessCSS).NEW_LINE)) {
+  fail("Failed to generate Less CSS with embeded SVGs");
+}
+
+success("Succesfully generated Less CSS with embeded SVGs");

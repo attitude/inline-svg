@@ -1,0 +1,14 @@
+{
+    "name": "attitude/inline-svg",
+    "description": "Generates inline SVGs [devtool]",
+    "type": "devtool",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Martin Adamko",
+            "email": "attitude@users.noreply.github.com"
+        }
+    ],
+    "require": {},
+    "bin": ["bin/inline-svg"]
+}
